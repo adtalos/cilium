@@ -2706,6 +2706,8 @@ envoy:
   policyRestoreTimeoutDuration: null
   # -- Time in seconds to block Envoy worker thread while an upstream HTTP connection is closing. If set to 0, the connection is closed immediately (with TCP RST). If set to -1, the connection is closed asynchronously in the background.
   httpUpstreamLingerTimeout: null
+  # -- Enable access log.
+  enableAccessLog: true
   # -- Envoy container image.
   image:
     # @schema

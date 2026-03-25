@@ -62,6 +62,7 @@ cilium-agent hive [flags]
       --dynamic-lifecycle-config string                           List of dynamic lifecycle features and their configuration including the dependencies (default "[]")
       --egress-gateway-policy-map-max int                         Maximum number of entries in egress gateway policy map (default 16384)
       --egress-gateway-reconciliation-trigger-interval duration   Time between triggers of egress gateway state reconciliations (default 1s)
+      --envoy-enable-access-log                                         Enable Access Log (default true)
       --enable-active-connection-tracking                         Count open and active connections to services, grouped by zones defined in fixed-zone-mapping.
       --enable-bandwidth-manager                                  Enable BPF bandwidth manager
       --enable-bbr                                                Enable BBR for the bandwidth manager

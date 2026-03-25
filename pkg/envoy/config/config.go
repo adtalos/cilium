@@ -40,6 +40,7 @@ type ProxyConfig struct {
 	ProxyXffNumTrustedHopsEgress        uint32
 	EnvoyPolicyRestoreTimeout           time.Duration
 	EnvoyHTTPUpstreamLingerTimeout      int
+	EnvoyEnableAccessLog                bool
 }
 
 func (r ProxyConfig) Flags(flags *pflag.FlagSet) {
@@ -75,6 +76,7 @@ func (r ProxyConfig) Flags(flags *pflag.FlagSet) {
 	flags.Duration("envoy-policy-restore-timeout", 3*time.Minute, "Maximum time to wait for endpoint policy restoration before starting serving resources to Envoy")
 	flags.Int("envoy-http-upstream-linger-timeout", -1, "Time in seconds to block Envoy worker thread while an upstream HTTP connection is closing. "+
 		"If set to 0, the connection is closed immediately (with TCP RST). If set to -1, the connection is closed asynchronously in the background.")
+	flags.Bool("envoy-enable-access-log", true, "Enable Access Log")
 }
 
 type SecretSyncConfig struct {

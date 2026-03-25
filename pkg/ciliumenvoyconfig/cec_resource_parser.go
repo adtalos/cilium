@@ -67,6 +67,7 @@ type CECResourceParser struct {
 	defaultMaxConnections       uint32
 	defaultMaxRequests          uint32
 	httpLingerConfig            int
+	accessLogPath               string
 }
 
 type parserParams struct {
@@ -91,6 +92,9 @@ func newCECResourceParser(params parserParams) *CECResourceParser {
 		defaultMaxConnections:       params.EnvoyConfig.ProxyClusterMaxConnections,
 		defaultMaxRequests:          params.EnvoyConfig.ProxyClusterMaxRequests,
 		httpLingerConfig:            params.EnvoyConfig.EnvoyHTTPUpstreamLingerTimeout,
+	}
+	if params.EnvoyConfig.EnvoyEnableAccessLog {
+		parser.accessLogPath = envoy.GetAccessLogSocketPath()
 	}
 
 	// Retrieve Ingress IPs from local Node.
@@ -227,7 +231,7 @@ func (r *CECResourceParser) ParseResources(cecNamespace string, cecName string, 
 							}
 						}
 						if injectCiliumDownstreamFilters {
-							l7FilterUpdated := injectCiliumL7Filter(hcmConfig)
+							l7FilterUpdated := injectCiliumL7Filter(r.accessLogPath, hcmConfig)
 							updated = updated || l7FilterUpdated
 						}
 
@@ -548,7 +552,7 @@ func (r *CECResourceParser) ParseResources(cecNamespace string, cecName string, 
 					supportsALPN = true
 				}
 			}
-			injected, err := injectCiliumUpstreamL7Filter(opts, supportsALPN)
+			injected, err := injectCiliumUpstreamL7Filter(r.accessLogPath, opts, supportsALPN)
 			if err != nil {
 				return envoy.Resources{}, fmt.Errorf("failed to inject upstream filters for cluster %q: %w", cluster.Name, err)
 			}
@@ -760,7 +764,7 @@ func qualifyRouteConfigurationResourceNames(namespace, name string, routeConfig 
 }
 
 // injectCiliumL7Filter injects the Cilium HTTP filter just before the HTTP Router filter
-func injectCiliumL7Filter(hcmConfig *envoy_config_http.HttpConnectionManager) bool {
+func injectCiliumL7Filter(accessLogPath string, hcmConfig *envoy_config_http.HttpConnectionManager) bool {
 	foundCiliumL7Filter := false
 
 	for j, httpFilter := range hcmConfig.HttpFilters {
@@ -770,7 +774,7 @@ func injectCiliumL7Filter(hcmConfig *envoy_config_http.HttpConnectionManager) bo
 		case envoyRouterFilterName:
 			if !foundCiliumL7Filter {
 				hcmConfig.HttpFilters = append(hcmConfig.HttpFilters[:j+1], hcmConfig.HttpFilters[j:]...)
-				hcmConfig.HttpFilters[j] = envoy.GetCiliumHttpFilter()
+				hcmConfig.HttpFilters[j] = envoy.GetCiliumHttpFilter(accessLogPath)
 				return true
 			}
 		}
@@ -816,7 +820,7 @@ func qualifyHttpFilters(cecNamespace string, cecName string, hcmConfig *envoy_co
 }
 
 // injectCiliumUpstreamL7Filter injects the Cilium HTTP filter just before the Upstream Codec filter
-func injectCiliumUpstreamL7Filter(opts *envoy_config_upstream.HttpProtocolOptions, supportsALPN bool) (bool, error) {
+func injectCiliumUpstreamL7Filter(accessLogPath string, opts *envoy_config_upstream.HttpProtocolOptions, supportsALPN bool) (bool, error) {
 	filters := opts.GetHttpFilters()
 	if filters == nil {
 		filters = make([]*envoy_config_http.HttpFilter, 0, 2)
@@ -848,9 +852,9 @@ func injectCiliumUpstreamL7Filter(opts *envoy_config_upstream.HttpProtocolOption
 		j := codecFilterIndex
 		if j >= 0 {
 			filters = append(filters[:j+1], filters[j:]...)
-			filters[j] = envoy.GetCiliumHttpFilter()
+			filters[j] = envoy.GetCiliumHttpFilter(accessLogPath)
 		} else {
-			filters = append(filters, envoy.GetCiliumHttpFilter())
+			filters = append(filters, envoy.GetCiliumHttpFilter(accessLogPath))
 		}
 		changed = true
 	}

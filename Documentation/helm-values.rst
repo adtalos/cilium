@@ -1620,6 +1620,10 @@
      - DNS policy for Cilium envoy pods. Ref: https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#pod-s-dns-policy
      - string
      - ``nil``
+   * - :spelling:ignore:`envoy.enableAccessLog`
+     - Enable access log.
+     - bool
+     - ``true``
    * - :spelling:ignore:`envoy.enabled`
      - Enable Envoy Proxy in standalone DaemonSet. This field is enabled by default for new installation.
      - string

@@ -2434,6 +2434,9 @@
             "string"
           ]
         },
+        "enableAccessLog": {
+          "type": "boolean"
+        },
         "enabled": {
           "type": [
             "null",

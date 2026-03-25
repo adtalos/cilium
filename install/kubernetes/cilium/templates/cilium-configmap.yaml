@@ -1476,6 +1476,8 @@ data:
   envoy-http-upstream-linger-timeout: {{ .Values.envoy.httpUpstreamLingerTimeout | quote }}
 {{- end }}
 
+  envoy-enable-access-log: {{ .Values.envoy.enableAccessLog | quote }}
+
 {{- if .Values.envoy.policyRestoreTimeoutDuration }}
   envoy-policy-restore-timeout: {{ .Values.envoy.policyRestoreTimeoutDuration | quote }}
 {{- end }}
