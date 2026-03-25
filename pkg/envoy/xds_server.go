@@ -264,6 +264,7 @@ type xdsServerConfig struct {
 	policyRestoreTimeout          time.Duration
 	metrics                       xds.Metrics
 	httpLingerConfig              int
+	envoyAccessLogEnabled         bool
 }
 
 // newXDSServer creates a new xDS GRPC server.
@@ -277,9 +278,11 @@ func newXDSServer(logger *slog.Logger, restorerPromise promise.Promise[endpoints
 		localEndpointStore: localEndpointStore,
 
 		socketPath:    getXDSSocketPath(config.envoySocketDir),
-		accessLogPath: getAccessLogSocketPath(config.envoySocketDir),
 		config:        config,
 		secretManager: secretManager,
+	}
+	if config.envoyAccessLogEnabled {
+		xdsServer.accessLogPath = getAccessLogSocketPath(config.envoySocketDir)
 	}
 
 	xdsServer.initializeXdsConfigs()
@@ -395,12 +398,16 @@ func (s *xdsServer) stop() {
 	}
 }
 
-func GetCiliumHttpFilter() *envoy_config_http.HttpFilter {
+func GetAccessLogSocketPath() string {
+	return getAccessLogSocketPath(GetSocketDir(option.Config.RunDir))
+}
+
+func GetCiliumHttpFilter(accessLogPath string) *envoy_config_http.HttpFilter {
 	return &envoy_config_http.HttpFilter{
 		Name: "cilium.l7policy",
 		ConfigType: &envoy_config_http.HttpFilter_TypedConfig{
 			TypedConfig: toAny(&cilium.L7Policy{
-				AccessLogPath:  getAccessLogSocketPath(GetSocketDir(option.Config.RunDir)),
+				AccessLogPath:  accessLogPath,
 				Denied_403Body: option.Config.HTTP403Message,
 			}),
 		},
@@ -437,7 +444,7 @@ func (s *xdsServer) getHttpFilterChainProto(clusterName string, tls bool, isIngr
 		SkipXffAppend:     true,
 		XffNumTrustedHops: xffNumTrustedHops,
 		HttpFilters: []*envoy_config_http.HttpFilter{
-			GetCiliumHttpFilter(),
+			GetCiliumHttpFilter(s.accessLogPath),
 			{
 				Name: "envoy.filters.http.router",
 				ConfigType: &envoy_config_http.HttpFilter_TypedConfig{

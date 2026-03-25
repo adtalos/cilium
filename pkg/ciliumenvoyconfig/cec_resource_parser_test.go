@@ -95,7 +95,7 @@ func TestUpstreamInject(t *testing.T) {
 	// Empty options
 	//
 	var opts envoy_upstreams_http_v3.HttpProtocolOptions
-	changed, err := injectCiliumUpstreamL7Filter(&opts, false)
+	changed, err := injectCiliumUpstreamL7Filter(envoy.GetAccessLogSocketPath(), &opts, false)
 	assert.NoError(t, err)
 	assert.True(t, changed)
 	assert.NotNil(t, opts.HttpFilters)
@@ -110,7 +110,7 @@ func TestUpstreamInject(t *testing.T) {
 	assert.NotNil(t, opts.GetUseDownstreamProtocolConfig()) // no ALPN support
 
 	// already present
-	changed, err = injectCiliumUpstreamL7Filter(&opts, true)
+	changed, err = injectCiliumUpstreamL7Filter(envoy.GetAccessLogSocketPath(), &opts, true)
 	assert.NoError(t, err)
 	assert.False(t, changed)
 	assert.NotNil(t, opts.HttpFilters)
@@ -135,7 +135,7 @@ func TestUpstreamInject(t *testing.T) {
 			},
 		},
 	}
-	changed, err = injectCiliumUpstreamL7Filter(&opts, true)
+	changed, err = injectCiliumUpstreamL7Filter(envoy.GetAccessLogSocketPath(), &opts, true)
 	assert.NoError(t, err)
 	assert.True(t, changed)
 	assert.NotNil(t, opts.HttpFilters)
@@ -157,7 +157,7 @@ func TestUpstreamInject(t *testing.T) {
 			},
 		},
 	}
-	changed, err = injectCiliumUpstreamL7Filter(&opts, true)
+	changed, err = injectCiliumUpstreamL7Filter(envoy.GetAccessLogSocketPath(), &opts, true)
 	assert.NoError(t, err)
 	assert.True(t, changed)
 	assert.NotNil(t, opts.HttpFilters)
@@ -186,7 +186,7 @@ func TestUpstreamInject(t *testing.T) {
 			},
 		},
 	}
-	changed, err = injectCiliumUpstreamL7Filter(&opts, true)
+	changed, err = injectCiliumUpstreamL7Filter(envoy.GetAccessLogSocketPath(), &opts, true)
 	assert.Error(t, err)
 	assert.False(t, changed)
 	assert.ErrorContains(t, err, "filter after codec filter: name:\"cilium.l7policy\"")
