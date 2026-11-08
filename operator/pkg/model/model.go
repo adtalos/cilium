@@ -1125,6 +1125,164 @@ type TLSSecretListenerData struct {
 	FrontendTLSValidation *FrontendTLSValidation
 }
 
+// TLSFilterChainData holds the TLS configuration for one HTTPS filter chain.
+type TLSFilterChainData struct {
+	TLSSecrets            []TLSSecret
+	Hostnames             []string
+	FrontendTLSValidation *FrontendTLSValidation
+	TLSOptions            TLSOptions
+}
+
+// TLSFilterChainData returns the TLS configuration for HTTPS filter chains.
+func (m *Model) TLSFilterChainData() []TLSFilterChainData {
+	return m.tlsFilterChainData(0, false)
+}
+
+// TLSFilterChainDataForPort returns the TLS configuration for HTTPS filter
+// chains on a port.
+func (m *Model) TLSFilterChainDataForPort(port uint32) []TLSFilterChainData {
+	return m.tlsFilterChainData(port, true)
+}
+
+func (m *Model) tlsFilterChainData(port uint32, filterByPort bool) []TLSFilterChainData {
+	type hostnameKey struct {
+		hostname      string
+		validationKey string
+		minTLSVersion string
+		maxTLSVersion string
+	}
+	type hostnameBucket struct {
+		key        hostnameKey
+		secrets    map[TLSSecret]struct{}
+		validation *FrontendTLSValidation
+	}
+	type filterChainKey struct {
+		secrets       string
+		validationKey string
+		minTLSVersion string
+		maxTLSVersion string
+	}
+	type filterChainBucket struct {
+		secrets    []TLSSecret
+		validation *FrontendTLSValidation
+		hostnames  []string
+	}
+
+	hostnameBuckets := make(map[hostnameKey]*hostnameBucket)
+	for _, listener := range m.HTTP {
+		if filterByPort && listener.Port != port {
+			continue
+		}
+		if len(listener.TLS) == 0 {
+			continue
+		}
+
+		options := TLSOptions{}
+		if listener.TLSOptions != nil {
+			options = *listener.TLSOptions
+		}
+		key := hostnameKey{
+			hostname:      normalizeHostname(listener.Hostname),
+			validationKey: frontendTLSValidationKey(listener.FrontendTLSValidation),
+			minTLSVersion: options.MinVersion,
+			maxTLSVersion: options.MaxVersion,
+		}
+
+		bucket, ok := hostnameBuckets[key]
+		if !ok {
+			bucket = &hostnameBucket{
+				key:        key,
+				secrets:    make(map[TLSSecret]struct{}),
+				validation: listener.FrontendTLSValidation,
+			}
+			hostnameBuckets[key] = bucket
+		}
+		for _, secret := range listener.TLS {
+			bucket.secrets[secret] = struct{}{}
+		}
+	}
+
+	filterChainBuckets := make(map[filterChainKey]*filterChainBucket)
+	for _, bucket := range hostnameBuckets {
+		secrets := make([]TLSSecret, 0, len(bucket.secrets))
+		for secret := range bucket.secrets {
+			secrets = append(secrets, secret)
+		}
+		secrets = sortedUniqueTLSSecrets(secrets)
+		key := filterChainKey{
+			secrets:       tlsSecretsKey(secrets),
+			validationKey: bucket.key.validationKey,
+			minTLSVersion: bucket.key.minTLSVersion,
+			maxTLSVersion: bucket.key.maxTLSVersion,
+		}
+		filterChain, ok := filterChainBuckets[key]
+		if !ok {
+			filterChain = &filterChainBucket{
+				secrets:    secrets,
+				validation: bucket.validation,
+			}
+			filterChainBuckets[key] = filterChain
+		}
+		filterChain.hostnames = append(filterChain.hostnames, bucket.key.hostname)
+	}
+
+	keys := make([]filterChainKey, 0, len(filterChainBuckets))
+	for key := range filterChainBuckets {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].secrets != keys[j].secrets {
+			return keys[i].secrets < keys[j].secrets
+		}
+		if keys[i].validationKey != keys[j].validationKey {
+			return keys[i].validationKey < keys[j].validationKey
+		}
+		if keys[i].minTLSVersion != keys[j].minTLSVersion {
+			return keys[i].minTLSVersion < keys[j].minTLSVersion
+		}
+		return keys[i].maxTLSVersion < keys[j].maxTLSVersion
+	})
+
+	result := make([]TLSFilterChainData, 0, len(keys))
+	for _, key := range keys {
+		bucket := filterChainBuckets[key]
+		result = append(result, TLSFilterChainData{
+			TLSSecrets:            bucket.secrets,
+			Hostnames:             slices.SortedUnique(bucket.hostnames),
+			FrontendTLSValidation: bucket.validation,
+			TLSOptions:            TLSOptions{MinVersion: key.minTLSVersion, MaxVersion: key.maxTLSVersion},
+		})
+	}
+
+	return result
+}
+
+func sortedUniqueTLSSecrets(secrets []TLSSecret) []TLSSecret {
+	result := append([]TLSSecret(nil), secrets...)
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Namespace != result[j].Namespace {
+			return result[i].Namespace < result[j].Namespace
+		}
+		return result[i].Name < result[j].Name
+	})
+
+	unique := result[:0]
+	for _, secret := range result {
+		if len(unique) == 0 || unique[len(unique)-1] != secret {
+			unique = append(unique, secret)
+		}
+	}
+	return unique
+}
+
+func tlsSecretsKey(secrets []TLSSecret) string {
+	keys := make([]string, 0, len(secrets))
+	for _, secret := range secrets {
+		keys = append(keys, secret.Namespace+"/"+secret.Name)
+	}
+	return strings.Join(keys, ",")
+}
+
 // TLSSecretsToHostnamesWithValidation returns grouped TLS secret data with hostnames and frontend validation.
 // This is only for HTTP listeners.
 func (m *Model) TLSSecretsToHostnamesWithValidation() []TLSSecretListenerData {

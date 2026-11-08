@@ -6,8 +6,6 @@ package translation
 import (
 	"cmp"
 	"fmt"
-	"iter"
-	"maps"
 	goslices "slices"
 	"strings"
 	"syscall"
@@ -359,73 +357,32 @@ func (i *cecTranslator) filterChains(name string, m *model.Model) ([]*envoy_conf
 	return filterChains, nil
 }
 
-type tlsFilterChainKey struct {
-	Secret  model.TLSSecret
-	Options model.TLSOptions
-}
-
-func newTLSFilterChainKey(secret model.TLSSecret, options *model.TLSOptions) tlsFilterChainKey {
-	key := tlsFilterChainKey{Secret: secret}
-	if options != nil {
-		key.Options = *options
-	}
-	return key
-}
-
-func sortedTLSFilterChainKeys(keys iter.Seq[tlsFilterChainKey]) []tlsFilterChainKey {
-	return goslices.SortedStableFunc(keys, func(a, b tlsFilterChainKey) int {
-		if c := cmp.Compare(a.Secret.Namespace, b.Secret.Namespace); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(a.Secret.Name, b.Secret.Name); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(a.Options.MinVersion, b.Options.MinVersion); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.Options.MaxVersion, b.Options.MaxVersion)
-	})
-}
-
 // httpsFilterChains returns the HTTPS filter chains for the given model.
 func (i *cecTranslator) httpsFilterChains(name string, m *model.Model) ([]*envoy_config_listener.FilterChain, error) {
-	tlsData := m.TLSSecretsToHostnamesWithValidation()
+	tlsData := m.TLSFilterChainData()
 	if len(tlsData) == 0 {
 		return nil, nil
 	}
 
-	tlsListeners := m.TLSSecretsToListeners()
 	var filterChains []*envoy_config_listener.FilterChain
 	for _, data := range tlsData {
-		hostsByKey := map[tlsFilterChainKey][]string{}
-		for _, ref := range tlsListeners[data.TLSSecret] {
-			if !goslices.Contains(data.Hostnames, ref.Hostname) {
-				continue
-			}
-
-			key := newTLSFilterChainKey(data.TLSSecret, ref.TLSOptions)
-			hostsByKey[key] = append(hostsByKey[key], ref.Hostname)
+		secureHCMName := fmt.Sprintf("%s-%s", name, secureHost)
+		secureHCM, err := i.desiredHTTPConnectionManager(secureHCMName, secureHCMName, m)
+		if err != nil {
+			return nil, err
 		}
-
-		for _, key := range sortedTLSFilterChainKeys(maps.Keys(hostsByKey)) {
-			secureHCMName := fmt.Sprintf("%s-%s", name, secureHost)
-			secureHCM, err := i.desiredHTTPConnectionManager(secureHCMName, secureHCMName, m)
-			if err != nil {
-				return nil, err
-			}
-			filterChains = append(filterChains, &envoy_config_listener.FilterChain{
-				FilterChainMatch: toFilterChainMatch(slices.SortedUnique(hostsByKey[key])),
-				Filters: []*envoy_config_listener.Filter{
-					{
-						Name: httpConnectionManagerType,
-						ConfigType: &envoy_config_listener.Filter_TypedConfig{
-							TypedConfig: secureHCM.Any,
-						},
+		filterChains = append(filterChains, &envoy_config_listener.FilterChain{
+			FilterChainMatch: toFilterChainMatch(data.Hostnames),
+			Filters: []*envoy_config_listener.Filter{
+				{
+					Name: httpConnectionManagerType,
+					ConfigType: &envoy_config_listener.Filter_TypedConfig{
+						TypedConfig: secureHCM.Any,
 					},
 				},
-				TransportSocket: toTransportSocket(i.Config.SecretsNamespace, []model.TLSSecret{data.TLSSecret}, data.FrontendTLSValidation, key.Options),
-			})
-		}
+			},
+			TransportSocket: toTransportSocket(i.Config.SecretsNamespace, data.TLSSecrets, data.FrontendTLSValidation, data.TLSOptions),
+		})
 	}
 
 	return filterChains, nil
@@ -640,42 +597,29 @@ func (i *cecTranslator) httpFilterChain(name string, m *model.Model) (*envoy_con
 
 // httpsFilterChainsForPort returns the HTTPS filter chains for the given port.
 func (i *cecTranslator) httpsFilterChainsForPort(name string, port uint32, m *model.Model) ([]*envoy_config_listener.FilterChain, error) {
-	tlsData := m.TLSSecretsToListenerDataForPort(port)
+	tlsData := m.TLSFilterChainDataForPort(port)
 	if len(tlsData) == 0 {
 		return nil, nil
 	}
 
-	tlsListeners := m.TLSSecretsToListeners()
 	var filterChains []*envoy_config_listener.FilterChain
 	for _, data := range tlsData {
-		hostsByKey := map[tlsFilterChainKey][]string{}
-		for _, ref := range tlsListeners[data.TLSSecret] {
-			if ref.Port != port || !goslices.Contains(data.Hostnames, ref.Hostname) {
-				continue
-			}
-
-			key := newTLSFilterChainKey(data.TLSSecret, ref.TLSOptions)
-			hostsByKey[key] = append(hostsByKey[key], ref.Hostname)
+		hcm, err := i.desiredHTTPConnectionManager(name, name, m)
+		if err != nil {
+			return nil, err
 		}
-
-		for _, key := range sortedTLSFilterChainKeys(maps.Keys(hostsByKey)) {
-			hcm, err := i.desiredHTTPConnectionManager(name, name, m)
-			if err != nil {
-				return nil, err
-			}
-			filterChains = append(filterChains, &envoy_config_listener.FilterChain{
-				FilterChainMatch: toFilterChainMatch(slices.SortedUnique(hostsByKey[key])),
-				Filters: []*envoy_config_listener.Filter{
-					{
-						Name: httpConnectionManagerType,
-						ConfigType: &envoy_config_listener.Filter_TypedConfig{
-							TypedConfig: hcm.Any,
-						},
+		filterChains = append(filterChains, &envoy_config_listener.FilterChain{
+			FilterChainMatch: toFilterChainMatch(data.Hostnames),
+			Filters: []*envoy_config_listener.Filter{
+				{
+					Name: httpConnectionManagerType,
+					ConfigType: &envoy_config_listener.Filter_TypedConfig{
+						TypedConfig: hcm.Any,
 					},
 				},
-				TransportSocket: toTransportSocket(i.Config.SecretsNamespace, []model.TLSSecret{key.Secret}, data.FrontendTLSValidation, key.Options),
-			})
-		}
+			},
+			TransportSocket: toTransportSocket(i.Config.SecretsNamespace, data.TLSSecrets, data.FrontendTLSValidation, data.TLSOptions),
+		})
 	}
 
 	return filterChains, nil
@@ -919,15 +863,16 @@ func tlsPassthroughBackendWeight(backend model.Backend) uint32 {
 }
 
 func toTransportSocket(ciliumSecretNamespace string, tls []model.TLSSecret, frontendValidation *model.FrontendTLSValidation, tlsOptions model.TLSOptions) *envoy_config_core_v3.TransportSocket {
-	var tlsSdsConfig []*envoy_extensions_transport_sockets_tls_v3.SdsSecretConfig
-	tlsMap := map[string]struct{}{}
+	tlsSdsNames := make([]string, 0, len(tls))
 	for _, t := range tls {
-		tlsMap[syncnames.SyncedSDSSecretName(ciliumSecretNamespace, types.NamespacedName{Namespace: t.Namespace, Name: t.Name})] = struct{}{}
+		tlsSdsNames = append(tlsSdsNames, syncnames.SyncedSDSSecretName(ciliumSecretNamespace, types.NamespacedName{Namespace: t.Namespace, Name: t.Name}))
 	}
+	tlsSdsNames = slices.SortedUnique(tlsSdsNames)
 
-	for k := range tlsMap {
+	tlsSdsConfig := make([]*envoy_extensions_transport_sockets_tls_v3.SdsSecretConfig, 0, len(tlsSdsNames))
+	for _, name := range tlsSdsNames {
 		tlsSdsConfig = append(tlsSdsConfig, &envoy_extensions_transport_sockets_tls_v3.SdsSecretConfig{
-			Name: k,
+			Name: name,
 		})
 	}
 
