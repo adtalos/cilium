@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of Cilium
 
+// This file was not reviewed by a human before submission
+
 package model
 
 import (
@@ -1112,7 +1114,7 @@ func TestHTTPSessionPersistenceString(t *testing.T) {
 	assert.Equal(t, `cookie:"session|name":"/tenant:v1":true:true:"Strict"`, persistence.String())
 }
 
-func TestModel_TLSSecretsToHostnamesWithValidation_SharedSecretDifferentValidation(t *testing.T) {
+func TestModel_TLSFilterChainData_SharedSecretDifferentValidation(t *testing.T) {
 	secret := TLSSecret{Name: "server-cert", Namespace: "default"}
 	validOnly := &FrontendTLSValidation{
 		CACertRefs: []FullyQualifiedResource{
@@ -1142,16 +1144,14 @@ func TestModel_TLSSecretsToHostnamesWithValidation_SharedSecretDifferentValidati
 		},
 	}
 
-	got := m.TLSSecretsToHostnamesWithValidation()
+	got := m.TLSFilterChainData()
 	if len(got) != 2 {
 		t.Fatalf("expected 2 grouped entries, got %d", len(got))
 	}
 
-	gotByValidation := make(map[string]TLSSecretListenerData, len(got))
+	gotByValidation := make(map[string]TLSFilterChainData, len(got))
 	for _, entry := range got {
-		if entry.TLSSecret != secret {
-			t.Fatalf("unexpected TLS secret: %+v", entry.TLSSecret)
-		}
+		assert.Equal(t, []TLSSecret{secret}, entry.TLSSecrets)
 		gotByValidation[frontendTLSValidationKey(entry.FrontendTLSValidation)] = entry
 	}
 
@@ -1168,7 +1168,7 @@ func TestModel_TLSSecretsToHostnamesWithValidation_SharedSecretDifferentValidati
 	assert.Equal(t, []string{"b.example.com"}, insecureEntry.Hostnames)
 }
 
-func TestModel_TLSSecretsToHostnamesWithValidation_SharedSecretSameValidation(t *testing.T) {
+func TestModel_TLSFilterChainData_SharedSecretSameValidation(t *testing.T) {
 	secret := TLSSecret{Name: "server-cert", Namespace: "default"}
 	validation := &FrontendTLSValidation{
 		CACertRefs: []FullyQualifiedResource{
@@ -1192,19 +1192,17 @@ func TestModel_TLSSecretsToHostnamesWithValidation_SharedSecretSameValidation(t 
 		},
 	}
 
-	got := m.TLSSecretsToHostnamesWithValidation()
+	got := m.TLSFilterChainData()
 	if len(got) != 1 {
 		t.Fatalf("expected 1 grouped entry, got %d", len(got))
 	}
 
-	if got[0].TLSSecret != secret {
-		t.Fatalf("unexpected TLS secret: %+v", got[0].TLSSecret)
-	}
+	assert.Equal(t, []TLSSecret{secret}, got[0].TLSSecrets)
 	assert.Equal(t, []string{"a.example.com", "b.example.com"}, got[0].Hostnames)
 	assert.Equal(t, validation, got[0].FrontendTLSValidation)
 }
 
-func TestModel_TLSSecretsToHostnamesWithValidation_DeterministicOrder(t *testing.T) {
+func TestModel_TLSFilterChainData_DeterministicOrder(t *testing.T) {
 	listeners := []HTTPListener{
 		{
 			Hostname: "b.example.com",
@@ -1238,8 +1236,110 @@ func TestModel_TLSSecretsToHostnamesWithValidation_DeterministicOrder(t *testing
 		},
 	}
 
-	got1 := (&Model{HTTP: listeners}).TLSSecretsToHostnamesWithValidation()
-	got2 := (&Model{HTTP: []HTTPListener{listeners[2], listeners[0], listeners[1]}}).TLSSecretsToHostnamesWithValidation()
+	got1 := (&Model{HTTP: listeners}).TLSFilterChainData()
+	got2 := (&Model{HTTP: []HTTPListener{listeners[2], listeners[0], listeners[1]}}).TLSFilterChainData()
 
 	assert.Equal(t, got1, got2)
+}
+
+func TestModel_TLSFilterChainData_CertificateSets(t *testing.T) {
+	rsa := TLSSecret{Namespace: "default", Name: "rsa"}
+	ecdsa := TLSSecret{Namespace: "certificates", Name: "ecdsa"}
+	validation := &FrontendTLSValidation{
+		CACertRefs:               []FullyQualifiedResource{{Namespace: "default", Name: "client-ca"}},
+		RequireClientCertificate: true,
+	}
+	options := TLSOptions{MinVersion: "1.3", MaxVersion: "1.3"}
+	cases := []struct {
+		name      string
+		listeners []HTTPListener
+		want      []TLSFilterChainData
+	}{
+		{
+			name: "single certificate",
+			listeners: []HTTPListener{
+				{Port: 443, Hostname: "a.example.com", TLS: []TLSSecret{rsa}},
+			},
+			want: []TLSFilterChainData{{TLSSecrets: []TLSSecret{rsa}, Hostnames: []string{"a.example.com"}}},
+		},
+		{
+			name: "duplicate references and reordered certificate sets",
+			listeners: []HTTPListener{
+				{Port: 443, Hostname: "a.example.com", TLS: []TLSSecret{rsa, ecdsa, rsa}},
+				{Port: 443, Hostname: "b.example.com", TLS: []TLSSecret{ecdsa, rsa}},
+			},
+			want: []TLSFilterChainData{{TLSSecrets: []TLSSecret{ecdsa, rsa}, Hostnames: []string{"a.example.com", "b.example.com"}}},
+		},
+		{
+			name: "partial certificate overlap",
+			listeners: []HTTPListener{
+				{Port: 443, Hostname: "a.example.com", TLS: []TLSSecret{rsa, ecdsa}},
+				{Port: 443, Hostname: "b.example.com", TLS: []TLSSecret{rsa}},
+			},
+			want: []TLSFilterChainData{
+				{TLSSecrets: []TLSSecret{ecdsa, rsa}, Hostnames: []string{"a.example.com"}},
+				{TLSSecrets: []TLSSecret{rsa}, Hostnames: []string{"b.example.com"}},
+			},
+		},
+		{
+			name: "empty and wildcard catch-all share matcher",
+			listeners: []HTTPListener{
+				{Port: 443, TLS: []TLSSecret{rsa}},
+				{Port: 443, Hostname: "*", TLS: []TLSSecret{ecdsa}},
+			},
+			want: []TLSFilterChainData{{TLSSecrets: []TLSSecret{ecdsa, rsa}, Hostnames: []string{"*"}}},
+		},
+		{
+			name: "wildcard and exact names preserve certificate sets",
+			listeners: []HTTPListener{
+				{Port: 443, Hostname: "*.example.com", TLS: []TLSSecret{rsa}},
+				{Port: 443, Hostname: "api.example.com", TLS: []TLSSecret{rsa, ecdsa}},
+			},
+			want: []TLSFilterChainData{
+				{TLSSecrets: []TLSSecret{ecdsa, rsa}, Hostnames: []string{"api.example.com"}},
+				{TLSSecrets: []TLSSecret{rsa}, Hostnames: []string{"*.example.com"}},
+			},
+		},
+		{
+			name: "TLS options stay with their listener",
+			listeners: []HTTPListener{
+				{Port: 443, Hostname: "a.example.com", TLS: []TLSSecret{rsa, ecdsa}},
+				{Port: 443, Hostname: "b.example.com", TLS: []TLSSecret{rsa, ecdsa}, TLSOptions: &options},
+			},
+			want: []TLSFilterChainData{
+				{TLSSecrets: []TLSSecret{ecdsa, rsa}, Hostnames: []string{"a.example.com"}},
+				{TLSSecrets: []TLSSecret{ecdsa, rsa}, Hostnames: []string{"b.example.com"}, TLSOptions: options},
+			},
+		},
+		{
+			name: "client validation stays with its listener",
+			listeners: []HTTPListener{
+				{Port: 443, Hostname: "a.example.com", TLS: []TLSSecret{rsa, ecdsa}},
+				{Port: 443, Hostname: "b.example.com", TLS: []TLSSecret{rsa, ecdsa}, FrontendTLSValidation: validation},
+			},
+			want: []TLSFilterChainData{
+				{TLSSecrets: []TLSSecret{ecdsa, rsa}, Hostnames: []string{"a.example.com"}},
+				{TLSSecrets: []TLSSecret{ecdsa, rsa}, Hostnames: []string{"b.example.com"}, FrontendTLSValidation: validation},
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			input := &Model{HTTP: test.listeners}
+			assert.Equal(t, test.want, input.TLSFilterChainData())
+			assert.Equal(t, test.want, input.TLSFilterChainDataForPort(443))
+			assert.Empty(t, input.TLSFilterChainDataForPort(8443))
+		})
+	}
+}
+
+func TestModel_TLSFilterChainData_PortIsolation(t *testing.T) {
+	rsa := TLSSecret{Namespace: "default", Name: "rsa"}
+	ecdsa := TLSSecret{Namespace: "default", Name: "ecdsa"}
+	input := &Model{HTTP: []HTTPListener{
+		{Port: 443, Hostname: "example.com", TLS: []TLSSecret{rsa, ecdsa}},
+		{Port: 8443, Hostname: "example.com", TLS: []TLSSecret{rsa}},
+	}}
+	assert.Equal(t, []TLSFilterChainData{{TLSSecrets: []TLSSecret{ecdsa, rsa}, Hostnames: []string{"example.com"}}}, input.TLSFilterChainDataForPort(443))
+	assert.Equal(t, []TLSFilterChainData{{TLSSecrets: []TLSSecret{rsa}, Hostnames: []string{"example.com"}}}, input.TLSFilterChainDataForPort(8443))
 }

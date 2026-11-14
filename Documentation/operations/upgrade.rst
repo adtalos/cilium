@@ -1,3 +1,5 @@
+.. This file was not reviewed by a human before submission
+
 .. only:: not (epub or latex or html)
 
     WARNING: You are looking at unreleased Cilium documentation.
@@ -16,6 +18,28 @@ This upgrade guide is intended for Cilium running on Kubernetes. If you have
 questions, feel free to ping us on `Cilium Slack`_.
 
 .. include:: upgrade-warning.rst
+
+Gateway API HTTPS certificates
+==============================
+
+HTTPS listeners now place all ``certificateRefs`` in one TLS context. This
+allows separate RSA and ECDSA TLS Secrets for the same listener; Envoy selects
+a certificate compatible with the client. Duplicate references are removed,
+and listeners that share only some certificates retain their own certificate
+sets. Single-certificate listeners keep their existing behavior.
+
+Keep each certificate chain and its matching private key in a separate
+Kubernetes TLS Secret. Cross-namespace references still require a
+``ReferenceGrant``. Validate both certificate types on an isolated Gateway
+before changing a production listener.
+
+This change does not add or replace custom session-ticket management. Apply
+it to the operator baseline that already provides that functionality, and
+verify that the generated TLS context retains the session-ticket SDS reference
+alongside both certificate references and the existing ALPN configuration.
+When rolling back to an operator without multi-certificate support, first
+restore single-certificate listener references and confirm that Envoy accepts
+the configuration.
 
 .. _pre_flight:
 

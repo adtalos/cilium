@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of Cilium
 
+// This file was not reviewed by a human before submission
+
 package model
 
 import (
+	"cmp"
+	"maps"
+	goslices "slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1118,13 +1123,6 @@ func (m *Model) AllPorts() []uint32 {
 	return slices.SortedUnique(ports)
 }
 
-// TLSSecretListenerData holds TLS secret data along with the listener's frontend validation.
-type TLSSecretListenerData struct {
-	TLSSecret             TLSSecret
-	Hostnames             []string
-	FrontendTLSValidation *FrontendTLSValidation
-}
-
 // TLSFilterChainData holds the TLS configuration for one HTTPS filter chain.
 type TLSFilterChainData struct {
 	TLSSecrets            []TLSSecret
@@ -1148,8 +1146,7 @@ func (m *Model) tlsFilterChainData(port uint32, filterByPort bool) []TLSFilterCh
 	type hostnameKey struct {
 		hostname      string
 		validationKey string
-		minTLSVersion string
-		maxTLSVersion string
+		options       TLSOptions
 	}
 	type hostnameBucket struct {
 		key        hostnameKey
@@ -1159,8 +1156,7 @@ func (m *Model) tlsFilterChainData(port uint32, filterByPort bool) []TLSFilterCh
 	type filterChainKey struct {
 		secrets       string
 		validationKey string
-		minTLSVersion string
-		maxTLSVersion string
+		options       TLSOptions
 	}
 	type filterChainBucket struct {
 		secrets    []TLSSecret
@@ -1184,8 +1180,7 @@ func (m *Model) tlsFilterChainData(port uint32, filterByPort bool) []TLSFilterCh
 		key := hostnameKey{
 			hostname:      normalizeHostname(listener.Hostname),
 			validationKey: frontendTLSValidationKey(listener.FrontendTLSValidation),
-			minTLSVersion: options.MinVersion,
-			maxTLSVersion: options.MaxVersion,
+			options:       options,
 		}
 
 		bucket, ok := hostnameBuckets[key]
@@ -1204,16 +1199,13 @@ func (m *Model) tlsFilterChainData(port uint32, filterByPort bool) []TLSFilterCh
 
 	filterChainBuckets := make(map[filterChainKey]*filterChainBucket)
 	for _, bucket := range hostnameBuckets {
-		secrets := make([]TLSSecret, 0, len(bucket.secrets))
-		for secret := range bucket.secrets {
-			secrets = append(secrets, secret)
-		}
-		secrets = sortedUniqueTLSSecrets(secrets)
+		secrets := goslices.SortedFunc(maps.Keys(bucket.secrets), func(left, right TLSSecret) int {
+			return cmp.Or(cmp.Compare(left.Namespace, right.Namespace), cmp.Compare(left.Name, right.Name))
+		})
 		key := filterChainKey{
 			secrets:       tlsSecretsKey(secrets),
 			validationKey: bucket.key.validationKey,
-			minTLSVersion: bucket.key.minTLSVersion,
-			maxTLSVersion: bucket.key.maxTLSVersion,
+			options:       bucket.key.options,
 		}
 		filterChain, ok := filterChainBuckets[key]
 		if !ok {
@@ -1237,10 +1229,10 @@ func (m *Model) tlsFilterChainData(port uint32, filterByPort bool) []TLSFilterCh
 		if keys[i].validationKey != keys[j].validationKey {
 			return keys[i].validationKey < keys[j].validationKey
 		}
-		if keys[i].minTLSVersion != keys[j].minTLSVersion {
-			return keys[i].minTLSVersion < keys[j].minTLSVersion
+		if keys[i].options.MinVersion != keys[j].options.MinVersion {
+			return keys[i].options.MinVersion < keys[j].options.MinVersion
 		}
-		return keys[i].maxTLSVersion < keys[j].maxTLSVersion
+		return keys[i].options.MaxVersion < keys[j].options.MaxVersion
 	})
 
 	result := make([]TLSFilterChainData, 0, len(keys))
@@ -1250,29 +1242,11 @@ func (m *Model) tlsFilterChainData(port uint32, filterByPort bool) []TLSFilterCh
 			TLSSecrets:            bucket.secrets,
 			Hostnames:             slices.SortedUnique(bucket.hostnames),
 			FrontendTLSValidation: bucket.validation,
-			TLSOptions:            TLSOptions{MinVersion: key.minTLSVersion, MaxVersion: key.maxTLSVersion},
+			TLSOptions:            key.options,
 		})
 	}
 
 	return result
-}
-
-func sortedUniqueTLSSecrets(secrets []TLSSecret) []TLSSecret {
-	result := append([]TLSSecret(nil), secrets...)
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Namespace != result[j].Namespace {
-			return result[i].Namespace < result[j].Namespace
-		}
-		return result[i].Name < result[j].Name
-	})
-
-	unique := result[:0]
-	for _, secret := range result {
-		if len(unique) == 0 || unique[len(unique)-1] != secret {
-			unique = append(unique, secret)
-		}
-	}
-	return unique
 }
 
 func tlsSecretsKey(secrets []TLSSecret) string {
@@ -1281,84 +1255,6 @@ func tlsSecretsKey(secrets []TLSSecret) string {
 		keys = append(keys, secret.Namespace+"/"+secret.Name)
 	}
 	return strings.Join(keys, ",")
-}
-
-// TLSSecretsToHostnamesWithValidation returns grouped TLS secret data with hostnames and frontend validation.
-// This is only for HTTP listeners.
-func (m *Model) TLSSecretsToHostnamesWithValidation() []TLSSecretListenerData {
-	return m.tlsSecretListenerData(0, false)
-}
-
-// TLSSecretsToListenerDataForPort returns grouped TLS secret data for HTTPS listeners on a port.
-func (m *Model) TLSSecretsToListenerDataForPort(port uint32) []TLSSecretListenerData {
-	return m.tlsSecretListenerData(port, true)
-}
-
-func (m *Model) tlsSecretListenerData(port uint32, filterByPort bool) []TLSSecretListenerData {
-	type listenerBucket struct {
-		secret              TLSSecret
-		validation          *FrontendTLSValidation
-		validationKey       string
-		aggregatedHostnames []string
-	}
-
-	res := make(map[string]*listenerBucket)
-	for _, h := range m.HTTP {
-		if filterByPort && h.Port != port {
-			continue
-		}
-		for _, s := range h.TLS {
-			validationKey := frontendTLSValidationKey(h.FrontendTLSValidation)
-			key := tlsSecretListenerDataKey(s, validationKey)
-			bucket, ok := res[key]
-			if !ok {
-				bucket = &listenerBucket{
-					secret:        s,
-					validation:    h.FrontendTLSValidation,
-					validationKey: validationKey,
-				}
-				res[key] = bucket
-			}
-			bucket.aggregatedHostnames = append(bucket.aggregatedHostnames, h.Hostname)
-		}
-	}
-
-	keys := make([]string, 0, len(res))
-	for k := range res {
-		keys = append(keys, k)
-	}
-
-	sort.Slice(keys, func(i, j int) bool {
-		left := res[keys[i]]
-		right := res[keys[j]]
-		if left.secret.Namespace != right.secret.Namespace {
-			return left.secret.Namespace < right.secret.Namespace
-		}
-		if left.secret.Name != right.secret.Name {
-			return left.secret.Name < right.secret.Name
-		}
-		return left.validationKey < right.validationKey
-	})
-
-	output := make([]TLSSecretListenerData, 0, len(keys))
-	for _, key := range keys {
-		bucket := res[key]
-		output = append(output, TLSSecretListenerData{
-			TLSSecret:             bucket.secret,
-			Hostnames:             slices.SortedUnique(bucket.aggregatedHostnames),
-			FrontendTLSValidation: bucket.validation,
-		})
-	}
-
-	return output
-}
-
-func tlsSecretListenerDataKey(secret TLSSecret, validationKey string) string {
-	return strings.Join([]string{
-		secret.Namespace,
-		secret.Name,
-		validationKey,
-	}, "|")
 }
 
 func frontendTLSValidationKey(validation *FrontendTLSValidation) string {
@@ -1381,27 +1277,4 @@ func frontendTLSValidationKey(validation *FrontendTLSValidation) string {
 	return "require_client_cert=" +
 		strconv.FormatBool(validation.RequireClientCertificate) +
 		";ca_refs=" + strings.Join(refs, ",")
-}
-
-// TLSListenerRef records the hostname, port, and TLS options for an HTTPS listener.
-type TLSListenerRef struct {
-	Hostname   string
-	Port       uint32
-	TLSOptions *TLSOptions
-}
-
-// TLSSecretsToListeners returns, for each TLS secret, the set of
-// HTTPS listener records (hostname, port, TLS options) that use it.
-func (m *Model) TLSSecretsToListeners() map[TLSSecret][]TLSListenerRef {
-	res := make(map[TLSSecret][]TLSListenerRef)
-	for _, l := range m.HTTP {
-		for _, s := range l.TLS {
-			res[s] = append(res[s], TLSListenerRef{
-				Hostname:   l.Hostname,
-				Port:       l.Port,
-				TLSOptions: l.TLSOptions,
-			})
-		}
-	}
-	return res
 }

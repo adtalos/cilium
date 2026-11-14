@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Authors of Cilium
 
+// This file was not reviewed by a human before submission
+
 package translation
 
 import (
+	"slices"
 	"testing"
 
 	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -1264,4 +1267,133 @@ func downstreamTLSContextFromTransportSocket(t *testing.T, ts *envoy_config_core
 	assert.NoError(t, err)
 
 	return downstreamCtx
+}
+
+func TestDesiredEnvoyListener_MultipleCertificates(t *testing.T) {
+	rsa := model.TLSSecret{Namespace: "default", Name: "rsa"}
+	ecdsa := model.TLSSecret{Namespace: "certificates", Name: "ecdsa"}
+	rsaSDS := syncnames.SyncedSDSSecretName("cilium-secrets", types.NamespacedName{Namespace: rsa.Namespace, Name: rsa.Name})
+	ecdsaSDS := syncnames.SyncedSDSSecretName("cilium-secrets", types.NamespacedName{Namespace: ecdsa.Namespace, Name: ecdsa.Name})
+	wantSDS := []string{rsaSDS, ecdsaSDS}
+	slices.Sort(wantSDS)
+	for _, hostname := range []string{"example.com", "", "*"} {
+		for _, perPort := range []bool{false, true} {
+			name := hostname
+			if name == "" {
+				name = "empty-hostname"
+			}
+			if perPort {
+				name += "/per-port"
+			}
+			t.Run(name, func(t *testing.T) {
+				translator := &cecTranslator{Config: Config{
+					SecretsNamespace: "cilium-secrets",
+					ListenerConfig:   ListenerConfig{UseAlpn: true},
+				}}
+				listeners := []model.HTTPListener{{
+					Port: 443, Hostname: hostname, TLS: []model.TLSSecret{rsa, ecdsa, rsa},
+					TLSOptions: &model.TLSOptions{MinVersion: "1.2", MaxVersion: "1.3"},
+					FrontendTLSValidation: &model.FrontendTLSValidation{
+						CACertRefs:               []model.FullyQualifiedResource{{Namespace: "default", Name: "client-ca"}},
+						RequireClientCertificate: true,
+					},
+				}}
+				if perPort {
+					listeners = append(listeners, model.HTTPListener{Port: 8443, Hostname: hostname, TLS: []model.TLSSecret{rsa}})
+				}
+				resources, err := translator.desiredEnvoyListener(&model.Model{HTTP: listeners})
+				require.NoError(t, err)
+				wantListeners := 1
+				if perPort {
+					wantListeners = 2
+				}
+				require.Len(t, resources, wantListeners)
+				if perPort {
+					otherListener := &envoy_config_listener.Listener{}
+					require.NoError(t, resources[1].UnmarshalTo(otherListener))
+					assert.Equal(t, "listener-8443", otherListener.Name)
+					require.Len(t, otherListener.FilterChains, 1)
+					otherContext := downstreamTLSContextFromTransportSocket(t, otherListener.FilterChains[0].TransportSocket)
+					require.Len(t, otherContext.CommonTlsContext.TlsCertificateSdsSecretConfigs, 1)
+					assert.Equal(t, rsaSDS, otherContext.CommonTlsContext.TlsCertificateSdsSecretConfigs[0].Name)
+				}
+				listener := &envoy_config_listener.Listener{}
+				require.NoError(t, resources[0].UnmarshalTo(listener))
+				chains := slices.DeleteFunc(listener.FilterChains, func(chain *envoy_config_listener.FilterChain) bool {
+					return chain.FilterChainMatch.TransportProtocol != tlsTransportProtocol
+				})
+				require.Len(t, chains, 1)
+				chain := chains[0]
+				if hostname == "" || hostname == "*" {
+					assert.Empty(t, chain.FilterChainMatch.ServerNames)
+				} else {
+					assert.Equal(t, []string{hostname}, chain.FilterChainMatch.ServerNames)
+				}
+				context := downstreamTLSContextFromTransportSocket(t, chain.TransportSocket)
+				var names []string
+				for _, config := range context.CommonTlsContext.TlsCertificateSdsSecretConfigs {
+					names = append(names, config.Name)
+				}
+				assert.Equal(t, wantSDS, names)
+				assert.Equal(t, []string{"h2,http/1.1"}, context.CommonTlsContext.AlpnProtocols)
+				assert.Equal(t, envoy_extensions_transport_sockets_tls_v3.TlsParameters_TLSv1_2, context.CommonTlsContext.TlsParams.TlsMinimumProtocolVersion)
+				assert.Equal(t, envoy_extensions_transport_sockets_tls_v3.TlsParameters_TLSv1_3, context.CommonTlsContext.TlsParams.TlsMaximumProtocolVersion)
+				assert.True(t, context.RequireClientCertificate.GetValue())
+				assert.Equal(t, syncnames.SyncedConfigMapSDSSecretName("cilium-secrets", types.NamespacedName{Namespace: "default", Name: "client-ca"}), downstreamValidationContextSDS(context).GetName())
+				require.Len(t, chain.Filters, 1)
+				hcm := &envoy_extensions_filters_network_hcm_v3.HttpConnectionManager{}
+				require.NoError(t, chain.Filters[0].GetTypedConfig().UnmarshalTo(hcm))
+				routeName := "listener-secure"
+				if perPort {
+					routeName = "listener-443"
+				}
+				assert.Equal(t, routeName, hcm.GetRds().GetRouteConfigName())
+			})
+		}
+	}
+}
+
+func Test_httpsFilterChains_PartialCertificateOverlap(t *testing.T) {
+	rsa := model.TLSSecret{Namespace: "default", Name: "rsa"}
+	ecdsa := model.TLSSecret{Namespace: "default", Name: "ecdsa"}
+	translator := &cecTranslator{Config: Config{SecretsNamespace: "cilium-secrets"}}
+	rsaSDS := syncnames.SyncedSDSSecretName("cilium-secrets", types.NamespacedName{Namespace: rsa.Namespace, Name: rsa.Name})
+	ecdsaSDS := syncnames.SyncedSDSSecretName("cilium-secrets", types.NamespacedName{Namespace: ecdsa.Namespace, Name: ecdsa.Name})
+	wantSDS := map[string][]string{
+		"a.example.com": {ecdsaSDS, rsaSDS},
+		"b.example.com": {rsaSDS},
+	}
+	slices.Sort(wantSDS["a.example.com"])
+	listeners := []model.HTTPListener{
+		{Port: 443, Hostname: "a.example.com", TLS: []model.TLSSecret{rsa, ecdsa}},
+		{Port: 443, Hostname: "b.example.com", TLS: []model.TLSSecret{rsa}},
+	}
+	for _, perPort := range []bool{false, true} {
+		input := &model.Model{HTTP: listeners}
+		build := func() ([]*envoy_config_listener.FilterChain, error) {
+			if perPort {
+				return translator.httpsFilterChainsForPort("listener-443", 443, input)
+			}
+			return translator.httpsFilterChains("listener", input)
+		}
+		chains, err := build()
+		require.NoError(t, err)
+		require.Len(t, chains, 2)
+		for _, chain := range chains {
+			require.Len(t, chain.FilterChainMatch.ServerNames, 1)
+			context := downstreamTLSContextFromTransportSocket(t, chain.TransportSocket)
+			var names []string
+			for _, config := range context.CommonTlsContext.TlsCertificateSdsSecretConfigs {
+				names = append(names, config.Name)
+			}
+			hostname := chain.FilterChainMatch.ServerNames[0]
+			require.Contains(t, wantSDS, hostname)
+			assert.Equal(t, wantSDS[hostname], names)
+		}
+		input.HTTP = []model.HTTPListener{listeners[1], listeners[0]}
+		input.HTTP[1].TLS = []model.TLSSecret{ecdsa, rsa}
+		reordered, err := build()
+		require.NoError(t, err)
+		assert.Empty(t, cmp.Diff(chains, reordered, protocmp.Transform()))
+	}
 }
